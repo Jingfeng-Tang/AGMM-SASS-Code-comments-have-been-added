@@ -19,10 +19,10 @@ from util.ohem import ProbOhemCrossEntropy2d
 from util.utils import count_params, AverageMeter, intersectionAndUnion, init_log, evaluate
 from util.dist_helper import setup_distributed
 
-os.environ['CUDA_VISIBLE_DEVICES'] = "0, 1, 2"
+os.environ['CUDA_VISIBLE_DEVICES'] = "0, 1"
 os.environ['MASTER_ADDR'] = 'localhost'
 os.environ['MASTER_PORT'] = '28890'
-# sh tools/train_voc.sh 3 28890
+# bash tools/train_voc.sh 3 28890
 
 parser = argparse.ArgumentParser(description='Sparsely-annotated Semantic Segmentation')
 parser.add_argument('--config', type=str, required=True)
@@ -34,7 +34,6 @@ parser.add_argument('--port', default=None, type=int)
 def main():
     args = parser.parse_args()
     cfg = yaml.load(open(args.config, "r"), Loader=yaml.Loader)
-
     logger = init_log('global', logging.INFO)
     logger.propagate = 0
     rank, word_size = setup_distributed(port=args.port)
@@ -84,6 +83,7 @@ def main():
     valloader = DataLoader(valset, batch_size=1, pin_memory=True, num_workers=2,
                            drop_last=False, sampler=valsampler)
 
+
     iters = 0
     total_iters = len(trainloader) * cfg['epochs']
     previous_best = 0.0
@@ -102,7 +102,13 @@ def main():
 
         for i, (img, mask, cls_label, id) in enumerate(trainloader):
             img, mask, cls_label = img.cuda(), mask.cuda(), cls_label.cuda()
+            # print(f'img.shape: {img.shape}')    # [16, 3, 321, 321] 原图
+            # print(f'mask.shape: {mask.shape}')  # [16, 321, 321] 点标签
+            # print(f'mask.shape: {mask[0,5,:]}')  # [16, 321, 321] 点标签
+            # print(f'cls_label.shape: {cls_label.shape}')    # [16, 21] 分类标签 从数据集中获取的完整的cls_label
             feat, pred = model(img)
+            # print(f'feat.shape: {feat.shape}')  # [16, 256, 81, 81]
+            # print(f'pred.shape: {pred.shape}')  # [16, 21, 321, 321]
 
             seg_loss = loss_calc(pred, mask,
                                  ignore_index=cfg['nclass'], multi=False,
@@ -110,10 +116,16 @@ def main():
             cls_loss = get_cls_loss(pred, cls_label, mask)
 
             # Gaussian
-            cur_cls_label = build_cur_cls_label(mask, cfg['nclass'])
-            pred_cl = clean_mask(pred, cls_label, True)
-            vecs, proto_loss = cal_protypes(feat, mask, cfg['nclass'])
-            res = GMM(feat, vecs, pred_cl, mask, cur_cls_label)
+            cur_cls_label = build_cur_cls_label(mask, cfg['nclass'])    # 从裁剪后图中获取的不完整的cls_label
+            # print(f'cur_cls_label.shape: {cur_cls_label.shape}')  # [16, 21, 1, 1]
+            pred_cl = clean_mask(pred, cls_label, True) # 保留正确类别的预测结果
+            # print(f'pred_cl.shape: {pred_cl.shape}')  # [16, 21, 321, 321]
+            vecs, proto_loss = cal_protypes(feat, mask, cfg['nclass'])  # 论文eq10,增大不同高斯混合质心的距离
+            # print(f'vecs.shape: {vecs.shape}')  # [16, 21, 256]
+            res = GMM(feat, vecs, pred_cl, mask, cur_cls_label) # res就是论文eq7的G
+            # print(f'res.shape: {res.shape}')  # [16, 21, 321, 321]
+            a = []
+            b = a[10]
             gmm_loss = cal_gmm_loss(pred.softmax(1), res, cur_cls_label, mask) + proto_loss + cls_loss
 
             # total loss
@@ -158,3 +170,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
