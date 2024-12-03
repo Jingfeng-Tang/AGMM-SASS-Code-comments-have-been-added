@@ -63,39 +63,53 @@ def one_hot_2d(label, nclass):
 
 
 def cal_protypes(feat, mask, nclass):
+    # print(f'feat.size(): {feat.size()}')    # [16, 256, 81, 81]
+    # print(f'mask.size(): {mask.size()}')    # [16, 321, 321]
     feat = F.interpolate(feat, size=mask.size()[-2:], mode='bilinear')
     b, c, h, w = feat.size()
+    # print(feat.size())  # [16, 256, 321, 321] 特征放到原图size
     prototypes = torch.zeros((b, nclass, c),
                            dtype=feat.dtype,
-                           device=feat.device)
+                           device=feat.device)  # 计算每个图的每个类的原型，原型size为256（特征维度）
     for i in range(b):
-        cur_mask = mask[i]
+        cur_mask = mask[i]  # 当前图的mask
         cur_mask_onehot = one_hot_2d(cur_mask, nclass)
+        # print(f'cur_mask_onehot.size(): {cur_mask_onehot.shape}')  # [21, 321, 321]
 
-        cur_feat = feat[i]
+        cur_feat = feat[i]  # 当前图的特征
         cur_prototype = torch.zeros((nclass, c),
                            dtype=feat.dtype,
-                           device=feat.device)
+                           device=feat.device)  # 当前图的每个类的原型
 
-        cur_set = list(torch.unique(cur_mask))
+        cur_set = list(torch.unique(cur_mask))  # 当前这个mask中存在的类或者背景或者255
         if nclass in cur_set:
-            cur_set.remove(nclass)
+            cur_set.remove(nclass)  # 删除背景
         if 255 in cur_set:
-            cur_set.remove(255)
+            cur_set.remove(255) # 删除255
 
         for cls in cur_set:
-            m = cur_mask_onehot[cls].view(1, h, w)
-            sum = m.sum()
-            m = m.expand(c, h, w).view(c, -1)
-            cls_feat = (cur_feat.view(c, -1)[m == 1]).view(c, -1).sum(-1)/(sum + 1e-6)
+            m = cur_mask_onehot[cls].view(1, h, w)  # [1, 321, 321] 图中存在的类的mask
+            sum = m.sum()   # 这个类的标签总共多少像素
+            m = m.expand(c, h, w).view(c, -1)  # [256, 103041]  类标签有256个1，其他都是0
+
+            cls_feat = (cur_feat.view(c, -1)[m == 1]).view(c, -1).sum(-1)/(sum + 1e-6)  # 当前图特征与上面mask相乘，取平均获得类别特征 256
+            # print(f'cls_feat.size(): {cls_feat.shape}')
+            # a = []
+            # b = a[10]
             cur_prototype[cls, :] = cls_feat
 
         prototypes[i] += cur_prototype
 
+    # 至此获得每个图的每个类的原型，原型size为256（特征维度）
     cur_cls_label = build_cur_cls_label(mask, nclass).view(b, nclass, 1)
-    mean_vecs = (prototypes.sum(0)*cur_cls_label.sum(0))/(cur_cls_label.sum(0)+1e-6)
+    # print(f'cur_cls_label.size(): {cur_cls_label.shape}')   # [16, 21, 1]
+    # a = []
+    # b = a[10]
 
-    loss = proto_loss(prototypes, mean_vecs, cur_cls_label)
+    mean_vecs = (prototypes.sum(0)*cur_cls_label.sum(0))/(cur_cls_label.sum(0)+1e-6)    # 对当前每个类都做平均，论文eq4
+    # print(f'mean_vecs.size(): {mean_vecs.shape}')   # [21, 256]
+
+    loss = proto_loss(prototypes, mean_vecs, cur_cls_label) # 论文eq10,增大不同高斯混合质心的距离
 
     return prototypes.view(b, nclass, c), loss
 
@@ -134,19 +148,50 @@ def proto_loss(prototypes, vecs, cur_cls_label):
 
 def GMM(feat, vecs, pred, true_mask, cls_label):
     b, k, oh, ow = pred.size()
+    # print(f'feat.size(): {feat.shape}')   # [16, 256, 81, 81]
+    # print(f'vecs.size(): {vecs.shape}')   # [16, 21, 256]
+    # print(f'pred.size(): {pred.shape}')   # [16, 21, 321, 321]
+    # print(f'true_mask.size(): {true_mask.shape}')   # [16, 321, 321]
+    # print(f'cls_label.size(): {cls_label.shape}')   # [16, 21, 1, 1]
+    # a = []
+    # b = a[10]
 
-    preserve = (true_mask < 255).long().view(b, 1, oh, ow)
+    preserve = (true_mask < 255).long().view(b, 1, oh, ow)  # 0为忽略像素，1为类别背景
+    # print(f'preserve1: {torch.unique(preserve)}')
+    # print(f'preserve1: {preserve.shape}')  # [16, 1, 321, 321]
+    # a = []
+    # b = a[10]
     preserve = F.interpolate(preserve.float(), size=feat.size()[-2:], mode='bilinear')
-    pred = F.interpolate(pred, size=feat.size()[-2:], mode='bilinear')
+    # print(f'--preserve2: {torch.unique(preserve)}')
+    # print(f'--preserve2: {preserve.shape}')  # [16, 1, 81, 81]
+    # a = []
+    # b = a[10]
+    pred = F.interpolate(pred, size=feat.size()[-2:], mode='bilinear')  # [16, 21, 81, 81]
     _, _, h, w = pred.size()
 
     vecs = vecs.view(b, k, -1, 1, 1)
+    # print(f'vecs: {vecs.shape}')  # [16, 21, 256, 1, 1] # 原型
     feat = feat.view(b, 1, -1, h, w)
+    # print(f'feat: {feat.shape}')  # [16, 1, 256, 81, 81]
+    # a = []
+    # b = a[10]
 
     """ 255 caused by cropping, using preserve mask """
-    abs = torch.abs(feat - vecs).mean(2)
-    abs = abs * cls_label.view(b, k, 1, 1) * preserve.view(b, 1, h, w)
+    abs = torch.abs(feat - vecs)    # eq6
+    # print(f'abs: {abs.shape}')  # [16, 21, 256, 81, 81]
+    abs = torch.abs(feat - vecs).mean(2)    # eq5
+    # print(f'abs: {abs.shape}')  # [16, 21, 81, 81]
+    # a = []
+    # b = a[10]
+
+    abs = abs * cls_label.view(b, k, 1, 1) * preserve.view(b, 1, h, w)  # 保留对应的类别，不知道插值preserve的目的？原本的binary mask变成概率mask了。费解
+    # abs2 = abs * cls_label.view(b, k, 1, 1)   # 好像应该在最后测试res是否相同，感觉* preserve没作用
+    # print(f'abs: {abs.shape}')  # [16, 21, 81, 81]
+    # print(abs2.equal(abs1))
     abs = abs.view(b, k, h*w)
+    # print(f'abs: {abs.shape}')  # [16, 21, 6561]
+    a = []
+    b = a[10]
 
     # """ calculate std """
     # pred = pred * preserve
@@ -158,9 +203,9 @@ def GMM(feat, vecs, pred, true_mask, cls_label):
     # std = std.view(b, k, 1, 1).detach()
 
     abs = abs.view(b, k, h, w)
-    res = torch.exp(-(abs * abs))
-    # res = torch.exp(-(abs*abs)/(2*std*std + 1e-6))
-    res = F.interpolate(res, size=(oh, ow), mode='bilinear')
+    res = torch.exp(-(abs * abs))   # 相当于没有eq7中e的指数的分母部分了
+    # res = torch.exp(-(abs*abs)/(2*std*std + 1e-6))      # 这里好像是原文的写法，但是被作者注释了
+    res = F.interpolate(res, size=(oh, ow), mode='bilinear')    # 插值回原图尺寸
     res = res * cls_label.view(b, k, 1, 1)
 
     return res
