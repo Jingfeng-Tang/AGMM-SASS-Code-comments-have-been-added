@@ -95,7 +95,7 @@ class VocDataset(Dataset):
             img = blur(img, p=0.5)
             img = random_bright(img, p=0.5)
 
-        img, mask = normalize(img, mask)
+        img, mask = normalize(img, mask)    # mask只是从numpy转为torch，img归一化
         cls_label = self.get_cls_label(cls_label)
         return img, mask, cls_label, id
 
